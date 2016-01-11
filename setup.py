@@ -30,9 +30,11 @@ setup(
     ],
     install_requires=[
         'docopt',
+        'nonstdlib',
         'numpy',
-        'scipy',
         'pandas',
+        'pylab',
+        'scipy',
     ],
     entry_points = {
         'console_scripts': ['mass_and_me=mass_and_me.main'],

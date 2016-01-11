@@ -30,146 +30,156 @@ Options:
 import itertools
 import numpy as np
 import pandas as pd
+from nonstdlib import *
 
 __version__ = '0.0.0'
 
-## Inputs
-# ======
-# List of expected masses
+class Peak:
+    """
+    An object representing a single peak in the mass spec data.  Each peak 
+    contains two pieces of data: a mass and an intensity.
+    """
 
-## Goal
-# ====
-# Rank those by how well they are supported by the data.
+    def __init__(self, mass, intensity):
+        self.mass = mass
+        self.intensity = intensity
 
-## Questions
-# =========
-# 1. Is the first column mass or mass/charge?
-#
-#    It's mass/charge.
-#
-# 2. How does the HPLC data play into things?
-#
-#    Fitzy can ask the mass spec to bin the data into particular time windows.  
-#    The sample data she sent me is a ten minute window, I think.  It would be 
-#    nice if this program could handle the binning, though, to save the manual 
-#    effort of creating 5-6 windows.  To do that, each mass would need to be 
-#    annotated with a time.  That may or may not be possible, though.
-#
-
-## Algorithm
-# =========
-# 1. Identify peaks in the mass spec data:
-#   
-#   a. Look for down/up/down patterns
-#
-#   b. Take intensity from "up" positions
-
-# 2. For each expected mass, note the intensity of the nearest peak (or 0 if 
-#    there are no peaks nearby).
-#
-# 3. For each expected mass, note if m/2, m/3, etc. peaks are present.
-#
-# 4. For each expected mass, note if an ion series is present (+1 +2 +3 for 
-#    m/1, +1/2 +2/2 +3/2 for m/2, etc.)
-#
-# 5. For each expected mass, note if a methyl modification is present (+14 for 
-#    m/1, +7 for m/2, +3.5 for m/3, etc.)
-#
-# 6. Sort each expected mass by how well it fulfills the above criteria.
-
-Z_SERIES = 1, 2, 3
-ION_SERIES = 1, 2, 3, 4
+    def __repr__(self):
+        """
+        Return a brief string describing this object.
+        """
+        return 'Peak({self.mass}, {self.intensity})' | fmt
 
 
 class ExpectedMass:
+    """
+    An object representing a mass that the user is expecting to find in the 
+    data.  Given a mass, this object can calculate quality metrics indicating 
+    how well that mass is supported by the data.  More specifically, these 
+    quality metrics comprise the intensities of peaks corresponding to the same 
+    mass with different charges, to the addition of one or more protons, and to 
+    modification by a methyl group.
+    """
 
     def __init__(self, mass):
         self.mass = mass
-        self.mz_intensities = {}
-        self.ion_intensities = {}
-        self.methyl_intensities = {}
+        self.mz_peaks = {}
+        self.ion_peaks = {}
+        self.methyl_peaks = {}
 
     def __repr__(self):
-        return 'ExpectedMass({})'.format(self.mass)
-
-    def __str__(self):
-        return """\
-mass: {}
-m/z intensities:
-    {}
-CH₃ intensities:
-    {}
-""".format(
-            self.mass,
-            '\n    '.join('z={}: {:12.3f}'.format(k,v) for k,v in self.mz_intensities.items()),
-            '\n    '.join('z={}: {:12.3f}'.format(k,v) for k,v in self.methyl_intensities.items()),
-        )
+        """
+        Return a brief string describing this object.
+        """
+        return 'ExpectedMass({self.mass})' | fmt
 
     def __eq__(self, other):
+        """
+        Two ``ExpectedMass`` objects are equal if they have the same mass.
+        """
         return self.mass == other.mass
 
     def __lt__(self, other):
         """
-        Return True is this mass appears to be better supported by the data 
-        than the other mass.
+        One ``ExpectedMass`` is regarded as "less than" another if it's better 
+        supported by the data.  This is useful for sorting, because the default 
+        sorting algorithms in python put the smallest items first.
         """
-        return self.mz_intensities[1] > other.mz_intensities[1]
+        return self.mz_peaks[1].intensity > other.mz_peaks[1].intensity
 
     def calculate_quality_metrics(self, ms, peaks):
-        # Find peaks that correspond to this mass but that have different 
-        # charges (z).  The code here keeps looking for peaks corresponding to 
-        # higher charges until it stops finding peaks.
+        """
+        Look for the ancillary peaks that would indicate that expected mass is 
+        supported by the data.
+        """
+        self._calculate_mz_peaks(ms, peaks)
+        self._calculate_ion_peaks(ms, peaks)
+        self._calculate_methyl_peaks(ms, peaks)
 
-        self.mz_intensities = {1: 0}
+    def _calculate_mz_peaks(self, ms, peaks):
+        """
+        Find peaks that correspond to this mass but that have different 
+        charges (z).  The code here keeps looking for peaks corresponding to 
+        higher charges until it stops finding peaks.
+        """
+        self.mz_peaks = {1: 0}
 
         for z in itertools.count(1):
-            intensity = find_intensity(ms, peaks, self.mass, z)
-            if intensity > 0:
-                self.mz_intensities[z] = intensity
+            peak = find_peak(ms, peaks, self.mass, z)
+            if peak.intensity > 0:
+                self.mz_peaks[z] = peak
             else:
                 break
 
-        # Find peaks that correspond to the addition of one or more protons to 
-        # the expected mass.  There are typically 4-5 such peaks, each one 
-        # decreasing in intensity.  The code here will keep looking for peaks
-        # that are heavier by the mass of a proton until it finds one that 
-        # increases in intensity, which is assumed to be a new species.
-
-        self.ion_intensities = {
+    def _calculate_ion_peaks(self, ms, peaks):
+        """
+        Find peaks that correspond to the addition of one or more protons to 
+        the expected mass.  There are typically 4-5 such peaks, each one 
+        decreasing in intensity.  The code here will keep looking for peaks
+        that are heavier by the mass of a proton until it finds one that 
+        increases in intensity, which is assumed to be a new species.
+        """
+        self.ion_peaks = {
                 z: []
-                for z in self.mz_intensities
+                for z in self.mz_peaks
         }
-        for z in self.mz_intensities:
-            prev_mass = self.mass
-            prev_intensity = self.mz_intensities[z]
-
+        for z in self.mz_peaks:
+            prev_peak = self.mz_peaks[z]
             while True:
-                next_mass = prev_mass + 1
-                next_intensity = find_intensity(ms, peaks, next_mass, z)
-
-                if next_intensity >= prev_intensity:
+                this_peak = find_peak(ms, peaks, prev_peak.mass + 1, z)
+                if this_peak.intensity >= prev_peak.intensity:
                     break
                 else:
-                    self.ion_intensities[z].append(next_intensity)
-                    prev_mass = next_mass
-                    prev_intensity = next_intensity
+                    self.ion_peaks[z].append(this_peak)
+                    prev_peak = this_peak
 
-        # Find peaks that correspond to the addition of a methyl group to the 
-        # expected mass.  Methyl has a mass or 14 (1 carbon + 3 hydrogens).
-                
-        self.methyl_intensities = {
-                z: find_intensity(ms, peaks, self.mass + 14, z)
-                for z in self.mz_intensities
+    def _calculate_methyl_peaks(self, ms, peaks):
+        """
+        Find peaks that correspond to the addition of a methyl group to the 
+        expected mass.  Methyl has a mass or 14 (1 carbon + 3 hydrogens).
+        """
+        self.methyl_peaks = {
+                z: find_peak(ms, peaks, self.mass + 14, z)
+                for z in self.mz_peaks
         }
+
+    def report_quality_metrics(self):
+        """
+        Print a brief summary of the previously calculated quality metric, to 
+        assist the user in deciding which peaks to manually verify.
+        """
+        print_color('mass: {self.mass}' | fmt, 'magenta', 'bold')
+
+        print(' m/z peaks:')
+        for z, peak in self.mz_peaks.items():
+            print('   z={}, m={:7.2f}, {}'.format(
+                z, peak.mass, format_intensity(peak.intensity)))
+
+        print(' ion series:')
+        for z, peaks in self.ion_peaks.items():
+            print('   z={}, m={:7.2f}(+n/{}), {}'.format(
+                z, self.mass/z, z,
+                ', '.join(format_intensity(x.intensity) for x in peaks)))
+
+        print(' CH₃ peaks:')
+        for z, peak in self.methyl_peaks.items():
+            print('   z={}, m={:7.2f}, {}'.format(
+                z, peak.mass, format_intensity(peak.intensity)))
+
+        print()
 
 
 
 def main():
+    """
+    Help identify promising peaks in mass spectrometry data.  Parse the options 
+    provided by the user on the command line and then carry out the requested 
+    analysis.
+    """
     import docopt
     args = docopt.docopt(__doc__)
     expected_masses = load_expected_masses(args['<expected_masses_csv>'])
     mass_spectra = load_mass_spectra(args['<mass_spectra_csv>'])
-
     generate_report(
             mass_spectra,
             expected_masses,
@@ -178,22 +188,42 @@ def main():
     if args['--visualize']:
         plot_mass_spectra(mass_spectra)
 
-
 def load_expected_masses(csv_path):
+    """
+    Read the given ``*.csv`` file and return a list of all the neutral masses 
+    found in the first column.  The file must contain nothing but masses (i.e. 
+    no headers or anything).  Masses outside the first column will be ignored.
+    """
     df = pd.read_csv(csv_path, header=None)
     return list(df[0])
 
 def load_mass_spectra(csv_paths):
+    """
+    Read the given mass spectrometer ``*.csv`` output files and convert each
+    one into a ``pandas.DataFrame`` with two columns: "Mass" and "Intensity".  
+    The ``*.csv`` file must contain masses in the first column and intensities 
+    in the second.  The data must start on the 8th row, and the seventh row 
+    must contain the headers "Mass" and "Intensity" in the first and second 
+    columns, respectively.
+    """
     return [pd.read_csv(x, header=7) for x in csv_paths]
 
-def generate_report(mass_spectra, expected_masses, peak_threshold):
+def generate_report(mass_spectra, expected_masses, peak_threshold=None):
+    """
+    For each mass spectra, search for peaks corresponding to the expected 
+    masses and print out a report summarizing how well each of those masses is 
+    supported by the data.
+    """
     for ms in mass_spectra:
-        peaks = find_peaks(ms, peak_threshold)
-        masses = find_masses(ms, peaks, expected_masses)
+        peaks = find_peak_indices(ms, peak_threshold)
+        masses = find_expected_masses(ms, peaks, expected_masses)
         for mass in masses:
-            print(mass)
+            mass.report_quality_metrics()
 
 def plot_mass_spectra(mass_spectra):
+    """
+    Display the data being analyzed in a separate window.
+    """
     import os, pylab
     import multiprocessing as mp
 
@@ -202,27 +232,38 @@ def plot_mass_spectra(mass_spectra):
 
     pylab.show()
 
-def find_peaks(ms, peak_threshold):
+def find_peak_indices(ms, peak_threshold=None):
+    """
+    Return a numpy array containing the indices of all the local maxima in the 
+    given mass spectrum ``ms``, excluding those maxima with intensities less 
+    ``peak_threshold``.  If ``peak_threshold`` isn't specified, all local 
+    maxima are included.
+    """
     from scipy.signal import argrelextrema
     peaks = argrelextrema(ms.Intensity.values, np.greater)[0]
-    return peaks[ms.Intensity.values[peaks] > peak_threshold]
+    return peaks[ms.Intensity.values[peaks] > (peak_threshold or 0)]
 
-def find_masses(ms, peaks, expected_masses):
+def find_expected_masses(ms, peaks, expected_masses):
+    """
+    Search for the given expected masses in the data.  Return a list of hits 
+    sorted such that the most well-supported masses are first.
+    """
     found_masses = [ExpectedMass(x) for x in expected_masses]
     for found_mass in found_masses:
         found_mass.calculate_quality_metrics(ms, peaks)
     return sorted(found_masses)
 
-def find_intensity(ms, peaks, mass, z=1):
+def find_peak(ms, peaks, mass, z=1):
     """
     Find the peak that corresponds to the given mass. 
     """
-    
-    # I thought using a binary search to implement this function, which 
+
+    # I thought about using a binary search to implement this function, which 
     # would've been O(log(N)) because the MS data is pre-sorted, but I decided 
     # that it's probably faster to just use numpy.
 
-    mass_diffs = np.abs(mass / z - ms.Mass.values[peaks])
+    charged_mass = mass / z
+    mass_diffs = np.abs(charged_mass - ms.Mass.values[peaks])
     peak_i = np.argmin(mass_diffs)
 
     # If the closest peak is further than 1 M/Z unit from the desired mass, 
@@ -230,9 +271,22 @@ def find_intensity(ms, peaks, mass, z=1):
     # returning an intensity of zero.
 
     if mass_diffs[peak_i] > 1 / z:
-        return 0
+        return Peak(charged_mass, 0)
     else:
-        return ms.Intensity[peaks[peak_i]]
+        i = peaks[peak_i]
+        return Peak(ms.Mass[i], ms.Intensity[i])
+
+def format_intensity(intensity):
+    """
+    Make the given intensity easy for the user to understand.  First, convert 
+    it to scientific notation following the convention for mass spectrometry 
+    intensities.  Second, color the number by its exponent to make it easy for 
+    the user to distinguish the largest values.
+    """
+    if intensity > 1e5: hilite = 'red'
+    elif intensity > 1e4: hilite = 'yellow'
+    else: hilite = 'normal'
+    return color('{intensity:.3e}' | fmt, hilite)
 
 
 if __name__ == '__main__':
