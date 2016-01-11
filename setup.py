@@ -22,7 +22,7 @@ setup(
     description='',
     long_description=readme,
     url='https://github.com/kalekundert/mass_and_me',
-    py_modules=[
+    pymodules=[
         'mass_and_me.py',
     ],
     keywords=[
