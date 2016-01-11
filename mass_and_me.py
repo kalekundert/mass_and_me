@@ -5,7 +5,6 @@ Search for expected peaks in mass spectrometry data.
 
 Usage:
     mass_plus_me <expected_masses_csv> <mass_spectra_csv>... [options]
-    mass_plus_me plot <mass_spectra_csv>...
 
 Arguments:
     <expected_masses_csv>
